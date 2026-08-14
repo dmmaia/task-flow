@@ -2,12 +2,16 @@ import { Module } from '@nestjs/common';
 import { JobModule } from './job/job.module';
 import { LoggerModule } from './logger/logger.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Logger } from './logger/logger.entity';
-import { Job } from './job/job.entity';
+import { ConfigModule } from '@nestjs/config';
+import { PostgresConfigService } from './config/database.config';
 
 @Module({
   imports: [
-    TypeOrmModule.forRoot(),
+    ConfigModule.forRoot({envFilePath:['.env.development.local','.env'],isGlobal:true}),
+    TypeOrmModule.forRootAsync({
+      imports:[ConfigModule],
+      useClass: PostgresConfigService,
+    }),
     JobModule, 
     LoggerModule
   ],
