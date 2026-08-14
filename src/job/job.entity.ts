@@ -1,8 +1,8 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn } from 'typeorm';
+import { Entity, Column, CreateDateColumn, PrimaryColumn } from 'typeorm';
 
 @Entity()
 export class Job {
-  @PrimaryGeneratedColumn()
+  @PrimaryColumn()
   id!: string;
 
   @Column()
@@ -10,6 +10,9 @@ export class Job {
 
   @Column()
   targetUrl!: string;
+
+  @Column()
+  status!: string;
 
   @Column({ nullable: true })
   runAt!: Date;
