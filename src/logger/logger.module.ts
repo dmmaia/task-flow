@@ -7,6 +7,7 @@ import { Logger } from './logger.entity';
 @Module({
   imports: [TypeOrmModule.forFeature([Logger])],
   controllers: [LoggerController],
-  providers: [LoggerService]
+  providers: [LoggerService],
+  exports:[LoggerService]
 })
 export class LoggerModule {}

@@ -3,10 +3,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Job } from './job.entity';
 import { LessThan, Repository } from 'typeorm';
 import { JobDto } from './job.dto';
-import { Cron, SchedulerRegistry } from '@nestjs/schedule';
+import { Cron, SchedulerRegistry, Timeout } from '@nestjs/schedule';
 import { CronJob } from 'cron';
 import { HttpService } from '@nestjs/axios';
 import { v4 as uuid } from 'uuid'
+import { LoggerService } from '../logger/logger.service';
 
 @Injectable()
 export class JobService {
@@ -14,13 +15,15 @@ export class JobService {
     @InjectRepository(Job)
     private jobRepository: Repository<Job>,
     private schedulerRegistry: SchedulerRegistry,
-    private readonly httpService: HttpService
+    private readonly httpService: HttpService,
+    private loggerService: LoggerService
   ){}
   
   findOne(id: string): Promise<Job | null> {
     return this.jobRepository.findOneBy({ id });
   }
 
+  @Timeout(0)
   @Cron('* * 00 * * *')
   async checkJobStatus(){
     const jobs = await this.jobRepository.find({ where:{status: "pending", runAt: LessThan(new Date())}})
@@ -40,6 +43,10 @@ export class JobService {
     job.id = id
 
     await this.jobRepository.save(job)
+    await this.loggerService.create(
+      job.id,
+      "Job created"
+    )
 
     const cronJob = new CronJob(new Date(newJob.runAt), async () => {
       await this.executeJob(job)
@@ -50,8 +57,20 @@ export class JobService {
   }
 
   async executeJob(job: Job){
-    this.httpService.post(job.targetUrl, job.payload)
-      await this.jobRepository.update({id:job.id},{status: "executed"})
+      try {
+        await this.httpService.post(job.targetUrl, job.payload)
+        await this.jobRepository.update({id:job.id},{status: "executed"})
+        await this.loggerService.create(
+          job.id,
+          "Job executed"
+        )
+      } catch (error) {
+        await this.jobRepository.update({id:job.id},{status: "failed"})
+        await this.loggerService.create(
+          job.id,
+          "Job fail to execute"
+        )
+      }
 
       this.schedulerRegistry.deleteCronJob(job.id);
   }
