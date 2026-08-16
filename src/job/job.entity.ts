@@ -20,6 +20,12 @@ export class Job {
   @Column({ type: 'jsonb'})
   payload!: Record<string, any>;
 
+  @Column()
+  attempts!: number
+
+  @Column()
+  nextAttemptAt: Date | undefined;
+
   @CreateDateColumn()
   createdAt!: Date;
   

@@ -3,18 +3,18 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Job } from './job.entity';
 import { LessThan, Repository } from 'typeorm';
 import { JobDto } from './job.dto';
-import { Cron, SchedulerRegistry, Timeout } from '@nestjs/schedule';
-import { CronJob } from 'cron';
+import { Cron } from '@nestjs/schedule';
 import { HttpService } from '@nestjs/axios';
 import { v4 as uuid } from 'uuid'
 import { LoggerService } from '../logger/logger.service';
 
 @Injectable()
 export class JobService {
+  private running = false;
+
   constructor(
     @InjectRepository(Job)
     private jobRepository: Repository<Job>,
-    private schedulerRegistry: SchedulerRegistry,
     private readonly httpService: HttpService,
     private loggerService: LoggerService
   ){}
@@ -23,12 +23,28 @@ export class JobService {
     return this.jobRepository.findOneBy({ id });
   }
 
-  @Timeout(0)
-  @Cron('* * 00 * * *')
+  @Cron('* * * * * *')
   async checkJobStatus(){
-    const jobs = await this.jobRepository.find({ where:{status: "pending", runAt: LessThan(new Date())}})
-    for(var job of jobs){
-      await this.executeJob(job);
+    if (this.running) return;
+
+    this.running = true;
+
+    try {
+      const jobs = await this.jobRepository.find({ 
+        where:
+          [
+            {status: 'pending', runAt: LessThan(new Date())},
+            {status: 'retrying', nextAttemptAt: LessThan(new Date())},
+          ],
+        order:{runAt:"ASC"},
+        lock: { mode: 'pessimistic_write' },
+        take: 50
+      })
+      for(var job of jobs){
+        await this.executeJob(job);
+      }
+    } finally {
+      this.running = false;
     }
   }
 
@@ -40,6 +56,7 @@ export class JobService {
     job.targetUrl = newJob.targetUrl
     job.runAt = newJob.runAt
     job.status = "pending"
+    job.attempts = 0
     job.id = id
 
     await this.jobRepository.save(job)
@@ -47,13 +64,6 @@ export class JobService {
       job.id,
       "Job created"
     )
-
-    const cronJob = new CronJob(new Date(newJob.runAt), async () => {
-      await this.executeJob(job)
-    });
-
-    this.schedulerRegistry.addCronJob(id, cronJob);
-    cronJob.start();
   }
 
   async executeJob(job: Job){
@@ -65,13 +75,25 @@ export class JobService {
           "Job executed"
         )
       } catch (error) {
-        await this.jobRepository.update({id:job.id},{status: "failed"})
+        if (job.attempts>=3){
+          await this.jobRepository.update({id:job.id},{status: "failed"})
+          await this.loggerService.create(
+            job.id,
+            "Job fail to execute"
+          )
+        }
+        const delay = 30 * (5 ** job.attempts)
+        job.attempts++
+        const lastAttempt = job.nextAttemptAt? new Date(job.nextAttemptAt): new Date(job.runAt)
+        await this.jobRepository.update({id:job.id},{
+          status: "retrying", 
+          nextAttemptAt: lastAttempt.setSeconds(lastAttempt.getSeconds()+delay),
+          attempts:job.attempts
+        })
         await this.loggerService.create(
           job.id,
-          "Job fail to execute"
+          "Job failed, retry sheduled"
         )
       }
-
-      this.schedulerRegistry.deleteCronJob(job.id);
   }
 }
