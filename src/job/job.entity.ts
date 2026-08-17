@@ -53,7 +53,7 @@ export class Job {
   @Column({
     nullable: true
   })
-  idempotencyKey!: string | null;
+  idempotencyKey!: string;
 
   @CreateDateColumn()
   createdAt!: Date;

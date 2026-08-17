@@ -23,7 +23,7 @@ export class JobController {
   }
 
   @Post()
-  async create(@Body() newJob: JobDto, @Headers('idempotencyKey') idempotencyKey){
+  async create(@Body() newJob: JobDto, @Headers('Idempotency-Key') idempotencyKey?: string){
     return await this.jobService.create(newJob, idempotencyKey)
   }
   

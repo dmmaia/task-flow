@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Job, JobStatus } from './job.entity';
-import { Brackets, DataSource, In, LessThan, Repository } from 'typeorm';
+import { Brackets, DataSource, In, LessThan, QueryFailedError, Repository } from 'typeorm';
 import { JobDto } from './job.dto';
 import { Cron } from '@nestjs/schedule';
 import { HttpService } from '@nestjs/axios';
@@ -149,16 +149,18 @@ export class JobService {
     }
   }
 
-  async create(newJob:JobDto, idempotencyKey){
+  async create(newJob:JobDto, idempotencyKey?: string){
+    const job:Job = new Job()
+
     if(idempotencyKey){
        const checkIfExists = await this.jobRepository.findOne({where:{idempotencyKey: idempotencyKey}})
 
       if(checkIfExists)
         return checkIfExists
+      job.idempotencyKey = idempotencyKey
     }
 
     const id = uuid()
-    const job:Job = new Job()
     job.task = newJob.task
     job.payload = newJob.payload
     job.targetUrl = newJob.targetUrl
@@ -166,12 +168,28 @@ export class JobService {
     job.attempts = 0
     job.id = id
 
-    const createdJob = await this.jobRepository.save(job)
-    await this.loggerService.create(
-      job.id,
-      "JOB_CREATED"
-    )
-    return createdJob
+    try {
+      const createdJob = await this.jobRepository.save(job)
+      await this.loggerService.create(
+        job.id,
+        "JOB_CREATED"
+      )
+      return createdJob
+    } catch (error) {
+      if(error instanceof QueryFailedError){
+        if (idempotencyKey && error.driverError?.code === '23505') {
+          const existing = await this.jobRepository.findOne({
+            where: { idempotencyKey }
+          });
+
+          if (existing) {
+            return existing;
+          }
+        }
+      }
+
+      throw error;
+    }
   }
 
   async executeJob(job: Job){
@@ -182,7 +200,13 @@ export class JobService {
         )
         
         await firstValueFrom(
-          this.httpService.post(job.targetUrl, job.payload, {timeout:30000})
+          this.httpService.post(job.targetUrl, job.payload, {
+            timeout:30000, 
+            headers:{
+              "X-TaskFlow-Job-Id": job.id,
+              "X-TaskFlow-Attempt": job.attempts
+            }
+          })
         )
         
         await this.jobRepository.update({id:job.id},{status: JobStatus.Executed})
