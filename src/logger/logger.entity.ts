@@ -11,6 +11,9 @@ export class Logger {
   @Column()
   message!: string;
 
+  @Column()
+  instanceId!: string
+
   @CreateDateColumn()
   createdAt!: Date;
   

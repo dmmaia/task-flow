@@ -1,12 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Job } from './job.entity';
-import { LessThan, Repository } from 'typeorm';
+import { Job, JobStatus } from './job.entity';
+import { Brackets, DataSource, In, LessThan, Repository } from 'typeorm';
 import { JobDto } from './job.dto';
 import { Cron } from '@nestjs/schedule';
 import { HttpService } from '@nestjs/axios';
 import { v4 as uuid } from 'uuid'
 import { LoggerService } from '../logger/logger.service';
+import { firstValueFrom } from 'rxjs';
 
 @Injectable()
 export class JobService {
@@ -16,11 +17,110 @@ export class JobService {
     @InjectRepository(Job)
     private jobRepository: Repository<Job>,
     private readonly httpService: HttpService,
-    private loggerService: LoggerService
+    private loggerService: LoggerService,
+    private dataSource: DataSource,
   ){}
   
   findOne(id: string): Promise<Job | null> {
     return this.jobRepository.findOneBy({ id });
+  }
+
+  async claimJobs(){
+    return await this.dataSource.transaction(async (entityManager) => {
+      const repository = entityManager.getRepository(Job);
+
+        const jobs = await repository
+          .createQueryBuilder('job')
+          .where(
+            new Brackets((qd)=>{
+              qd.where('job.status = :pendingStatus AND job.runAt < :now',{
+                pendingStatus: JobStatus.Pending,
+                now: new Date()
+              }).orWhere('job.status = :retryStatus AND job.nextAttemptAt < :now',{
+                retryStatus: JobStatus.Retrying,
+                now: new Date()
+              })
+            })
+          )
+          .orderBy('job.runAt', 'ASC')
+          .addOrderBy('job.nextAttemptAt', 'ASC')
+          .take(5)
+          .setLock('pessimistic_write')
+          .setOnLocked('skip_locked')
+          .getMany(); 
+
+      if (jobs.length === 0) {
+        return [];
+      }
+
+      const jobIds = jobs.map(job => job.id);
+
+      await repository
+        .createQueryBuilder('job')
+        .update(Job)
+        .set({ 
+          status: JobStatus.Processing, 
+          attempts: () => 'attempts + 1',
+          lockedUntil:  new Date(Date.now() + 60000) 
+        })
+        .where({ id: In(jobIds) })
+        .execute();
+
+      for(const job of jobs){
+        await this.loggerService.create(
+          job.id,
+          "JOB_CLAIMED, attempt = "+job.attempts+1
+        )
+      }
+      
+      return jobs
+      })
+  }
+
+  @Cron('0 * * * * *')
+  async checkProcessingJobs(){
+    await this.dataSource.transaction(async (entityManager) => {
+      const repository = entityManager.getRepository(Job);
+
+      const jobs = await repository
+        .createQueryBuilder('job')
+        .where('job.status = :status AND job.lockedUntil < :now',{
+          status: JobStatus.Processing,
+          now: new Date()
+        })
+        .setLock('pessimistic_write')
+        .setOnLocked('skip_locked')
+        .getMany(); 
+
+      if (jobs.length === 0) {
+        return [];
+      }
+
+      const jobIds = jobs.map(job => job.id);
+
+      for(const job of jobs){
+        await this.loggerService.create(
+          job.id,
+          "JOB_LEASE_EXPIRED"
+        )
+      }
+
+      await repository
+        .createQueryBuilder('job')
+        .update(Job)
+        .set({ 
+          status: JobStatus.Retrying, 
+          nextAttemptAt: new Date(Date.now() + 30 * 1000) })
+        .where({ id: In(jobIds) })
+        .execute();
+      
+      for(const job of jobs){
+        await this.loggerService.create(
+          job.id,
+          "JOB_RECOVERED"
+        )
+      }
+    })
   }
 
   @Cron('* * * * * *')
@@ -30,19 +130,11 @@ export class JobService {
     this.running = true;
 
     try {
-      const jobs = await this.jobRepository.find({ 
-        where:
-          [
-            {status: 'pending', runAt: LessThan(new Date())},
-            {status: 'retrying', nextAttemptAt: LessThan(new Date())},
-          ],
-        order:{runAt:"ASC"},
-        lock: { mode: 'pessimistic_write' },
-        take: 50
-      })
-      for(var job of jobs){
-        await this.executeJob(job);
-      }
+      const jobs = await this.claimJobs();
+      
+      await Promise.allSettled(
+        jobs.map(job => this.executeJob(job))
+      );
     } finally {
       this.running = false;
     }
@@ -54,46 +146,66 @@ export class JobService {
     job.task = newJob.task
     job.payload = newJob.payload
     job.targetUrl = newJob.targetUrl
-    job.runAt = newJob.runAt
-    job.status = "pending"
+    job.runAt = new Date(newJob.runAt)
     job.attempts = 0
     job.id = id
 
     await this.jobRepository.save(job)
     await this.loggerService.create(
       job.id,
-      "Job created"
+      "JOB_CREATED"
     )
   }
 
   async executeJob(job: Job){
       try {
-        await this.httpService.post(job.targetUrl, job.payload)
-        await this.jobRepository.update({id:job.id},{status: "executed"})
         await this.loggerService.create(
           job.id,
-          "Job executed"
+          "JOB_EXECUTION_STARTED"
+        )
+        
+        await firstValueFrom(
+          this.httpService.post(job.targetUrl, job.payload, {timeout:30000})
+        )
+        
+        await this.jobRepository.update({id:job.id},{status: JobStatus.Executed, attempts:job.attempts})
+        await this.loggerService.create(
+          job.id,
+          "JOB_COMPLETED"
         )
       } catch (error) {
+        await this.loggerService.create(
+          job.id,
+          "JOB_EXECUTION_FAILED"
+        )
         if (job.attempts>=3){
-          await this.jobRepository.update({id:job.id},{status: "failed"})
-          await this.loggerService.create(
-            job.id,
-            "Job fail to execute"
-          )
+          await this.jobRepository.update({id:job.id},{status: JobStatus.Failed, attempts:job.attempts})
+          return;
         }
-        const delay = 30 * (5 ** job.attempts)
-        job.attempts++
-        const lastAttempt = job.nextAttemptAt? new Date(job.nextAttemptAt): new Date(job.runAt)
+        
+        const delay = 30 * (2 ** (job.attempts - 1));
+        const nextAttemptAt = new Date(Date.now() + delay * 1000)
         await this.jobRepository.update({id:job.id},{
-          status: "retrying", 
-          nextAttemptAt: lastAttempt.setSeconds(lastAttempt.getSeconds()+delay),
+          status: JobStatus.Retrying, 
+          nextAttemptAt: nextAttemptAt,
           attempts:job.attempts
         })
         await this.loggerService.create(
           job.id,
-          "Job failed, retry sheduled"
+          "JOB_RETRY_SCHEDULED, retryAt = " + nextAttemptAt.toLocaleDateString()
         )
       }
   }
+
+  async find(){
+    return this.jobRepository.find()
+  }
+
+  async delete(jobId){
+    await this.jobRepository.delete({id:jobId})
+  }
+
+  async clean(){
+      await this.jobRepository.deleteAll()
+    }
 }

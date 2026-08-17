@@ -1,4 +1,4 @@
-import { IsUUID, IsDate, IsString, IsNotEmpty } from 'class-validator';
+import { IsUUID, IsDate, IsString, IsNotEmpty, IsDateString } from 'class-validator';
 
 export class JobDto {
     @IsString()
@@ -7,8 +7,8 @@ export class JobDto {
     @IsString()
     targetUrl!: string;
 
-    @IsDate()
-    runAt!: Date
+    @IsDateString()
+    runAt!: string;
 
     @IsNotEmpty()
     payload: any

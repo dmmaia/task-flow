@@ -1,5 +1,13 @@
 import { Entity, Column, CreateDateColumn, PrimaryColumn } from 'typeorm';
 
+export enum JobStatus {
+  Pending = 'pending',
+  Processing = 'processing',
+  Retrying = 'retrying',
+  Executed = 'executed',
+  Failed = 'failed',
+}
+
 @Entity()
 export class Job {
   @PrimaryColumn()
@@ -11,10 +19,16 @@ export class Job {
   @Column()
   targetUrl!: string;
 
-  @Column()
-  status!: string;
+  @Column({
+    type: 'enum',
+    enum: JobStatus,
+    default: JobStatus.Pending,
+  })
+  status!: JobStatus;
 
-  @Column({ nullable: true })
+  @Column({
+    type: 'timestamptz'
+  })
   runAt!: Date;
 
   @Column({ type: 'jsonb'})
@@ -23,8 +37,17 @@ export class Job {
   @Column()
   attempts!: number
 
-  @Column()
-  nextAttemptAt: Date | undefined;
+  @Column({
+    type: 'timestamptz',
+    nullable: true
+  })
+  nextAttemptAt!: Date | null;
+
+  @Column({
+    type: 'timestamptz',
+    nullable: true
+  })
+  lockedUntil!: Date | null;
 
   @CreateDateColumn()
   createdAt!: Date;

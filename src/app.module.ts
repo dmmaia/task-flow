@@ -4,6 +4,7 @@ import { LoggerModule } from './logger/logger.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
 import { PostgresConfigService } from './config/database.config';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
@@ -12,8 +13,9 @@ import { PostgresConfigService } from './config/database.config';
       imports:[ConfigModule],
       useClass: PostgresConfigService,
     }),
+    ScheduleModule.forRoot(),
     JobModule, 
-    LoggerModule
+    LoggerModule,
   ],
 })
 export class AppModule {}
