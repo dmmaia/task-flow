@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Headers } from '@nestjs/common';
 import { JobService } from './job.service';
 import { JobDto } from './job.dto';
 
@@ -23,8 +23,8 @@ export class JobController {
   }
 
   @Post()
-  async create(@Body() newJob: JobDto){
-    return await this.jobService.create(newJob)
+  async create(@Body() newJob: JobDto, @Headers('idempotencyKey') idempotencyKey){
+    return await this.jobService.create(newJob, idempotencyKey)
   }
   
 }

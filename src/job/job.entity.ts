@@ -1,4 +1,4 @@
-import { Entity, Column, CreateDateColumn, PrimaryColumn } from 'typeorm';
+import { Entity, Column, CreateDateColumn, PrimaryColumn, Unique } from 'typeorm';
 
 export enum JobStatus {
   Pending = 'pending',
@@ -9,6 +9,7 @@ export enum JobStatus {
 }
 
 @Entity()
+@Unique(['idempotencyKey']) 
 export class Job {
   @PrimaryColumn()
   id!: string;
@@ -48,6 +49,11 @@ export class Job {
     nullable: true
   })
   lockedUntil!: Date | null;
+
+  @Column({
+    nullable: true
+  })
+  idempotencyKey!: string | null;
 
   @CreateDateColumn()
   createdAt!: Date;

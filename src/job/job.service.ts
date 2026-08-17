@@ -12,6 +12,7 @@ import { firstValueFrom } from 'rxjs';
 @Injectable()
 export class JobService {
   private running = false;
+  private static readonly MAX_ATTEMPTS = 3;
 
   constructor(
     @InjectRepository(Job)
@@ -54,6 +55,7 @@ export class JobService {
       }
 
       const jobIds = jobs.map(job => job.id);
+      const lockedUntil = new Date(Date.now() + 60000) 
 
       await repository
         .createQueryBuilder('job')
@@ -61,15 +63,18 @@ export class JobService {
         .set({ 
           status: JobStatus.Processing, 
           attempts: () => 'attempts + 1',
-          lockedUntil:  new Date(Date.now() + 60000) 
+          lockedUntil: lockedUntil
         })
         .where({ id: In(jobIds) })
         .execute();
 
       for(const job of jobs){
+        job.attempts += 1;
+        job.status = JobStatus.Processing;
+        job.lockedUntil = lockedUntil;
         await this.loggerService.create(
           job.id,
-          "JOB_CLAIMED, attempt = "+job.attempts+1
+          "JOB_CLAIMED, attempt = "+job.attempts
         )
       }
       
@@ -82,7 +87,7 @@ export class JobService {
     await this.dataSource.transaction(async (entityManager) => {
       const repository = entityManager.getRepository(Job);
 
-      const jobs = await repository
+      var jobs = await repository
         .createQueryBuilder('job')
         .where('job.status = :status AND job.lockedUntil < :now',{
           status: JobStatus.Processing,
@@ -96,14 +101,18 @@ export class JobService {
         return [];
       }
 
-      const jobIds = jobs.map(job => job.id);
-
-      for(const job of jobs){
+      for(const [index, job] of jobs.entries()){
         await this.loggerService.create(
           job.id,
           "JOB_LEASE_EXPIRED"
         )
+        if (job.attempts>=JobService.MAX_ATTEMPTS){
+          await this.jobRepository.update({id:job.id},{status: JobStatus.Failed})
+          jobs.splice(index,1)
+        }
       }
+
+      const jobIds = jobs.map(job => job.id);
 
       await repository
         .createQueryBuilder('job')
@@ -140,7 +149,14 @@ export class JobService {
     }
   }
 
-  async create(newJob:JobDto){
+  async create(newJob:JobDto, idempotencyKey){
+    if(idempotencyKey){
+       const checkIfExists = await this.jobRepository.findOne({where:{idempotencyKey: idempotencyKey}})
+
+      if(checkIfExists)
+        return checkIfExists
+    }
+
     const id = uuid()
     const job:Job = new Job()
     job.task = newJob.task
@@ -150,11 +166,12 @@ export class JobService {
     job.attempts = 0
     job.id = id
 
-    await this.jobRepository.save(job)
+    const createdJob = await this.jobRepository.save(job)
     await this.loggerService.create(
       job.id,
       "JOB_CREATED"
     )
+    return createdJob
   }
 
   async executeJob(job: Job){
@@ -168,7 +185,7 @@ export class JobService {
           this.httpService.post(job.targetUrl, job.payload, {timeout:30000})
         )
         
-        await this.jobRepository.update({id:job.id},{status: JobStatus.Executed, attempts:job.attempts})
+        await this.jobRepository.update({id:job.id},{status: JobStatus.Executed})
         await this.loggerService.create(
           job.id,
           "JOB_COMPLETED"
@@ -178,8 +195,8 @@ export class JobService {
           job.id,
           "JOB_EXECUTION_FAILED"
         )
-        if (job.attempts>=3){
-          await this.jobRepository.update({id:job.id},{status: JobStatus.Failed, attempts:job.attempts})
+        if (job.attempts>=JobService.MAX_ATTEMPTS){
+          await this.jobRepository.update({id:job.id},{status: JobStatus.Failed})
           return;
         }
         
@@ -188,11 +205,10 @@ export class JobService {
         await this.jobRepository.update({id:job.id},{
           status: JobStatus.Retrying, 
           nextAttemptAt: nextAttemptAt,
-          attempts:job.attempts
         })
         await this.loggerService.create(
           job.id,
-          "JOB_RETRY_SCHEDULED, retryAt = " + nextAttemptAt.toLocaleDateString()
+          "JOB_RETRY_SCHEDULED, retryAt = " + nextAttemptAt.toISOString()
         )
       }
   }
@@ -207,5 +223,5 @@ export class JobService {
 
   async clean(){
       await this.jobRepository.deleteAll()
-    }
+  }
 }
